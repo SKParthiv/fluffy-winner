@@ -22,17 +22,284 @@ Boot safety rule:
 
 ## Table of contents
 
-1. [Hardware](#hardware)
-2. [Architecture](#architecture)
-3. [Control-flow diagram](#control-flow-diagram)
-4. [The mathematics](#the-mathematics)
-5. [Enabling / disabling calibration](#enabling--disabling-calibration)
-6. [Repository layout](#repository-layout)
-7. [Building](#building)
-8. [Testing](#testing)
-9. [Serial diagnostics commands](#serial-diagnostics-commands)
-10. [Coordinate frames, sign conventions and units](#coordinate-frames-sign-conventions-and-units)
-11. [Unknown hardware information (TODOs)](#unknown-hardware-information-todos)
+1. [Hardware & Validation TODO — START HERE](#hardware--validation-todo--start-here)
+2. [Step-by-step bring-up and usage](#step-by-step-bring-up-and-usage)
+3. [Hardware](#hardware)
+4. [Architecture](#architecture)
+5. [Control-flow diagram](#control-flow-diagram)
+6. [The mathematics](#the-mathematics)
+7. [Enabling / disabling calibration](#enabling--disabling-calibration)
+8. [Repository layout](#repository-layout)
+9. [Building](#building)
+10. [Testing](#testing)
+11. [Serial diagnostics commands](#serial-diagnostics-commands)
+12. [Coordinate frames, sign conventions and units](#coordinate-frames-sign-conventions-and-units)
+13. [Local UI (OLED + 4 buttons)](#local-ui-oled--4-buttons)
+
+---
+
+# Hardware & Validation TODO — START HERE
+
+Everything in this section **still requires physical verification**.
+Nothing here has been tested on hardware by the coding environment —
+compile success is not hardware validation. Confirmed facts are marked
+CONFIRMED; everything else is an open item. Work through this list in
+order using the [step-by-step bring-up](#step-by-step-bring-up-and-usage)
+procedure below.
+
+## ⚠️ Electrical constraint — read before connecting the sensor
+
+The **ESP32 GPIO/ADC inputs are NOT 5 V tolerant**. The RLS08 is
+expected to be powered at **5 V**, and its actual AOUT voltage **must be
+measured before connecting any channel to the ESP32**. Do **not** assume
+that a 5 V-powered sensor only swings to 3.3 V. If AOUT can exceed
+~3.3 V, a voltage divider (or other protection) is **required** on every
+channel.
+
+## Sensor (RLS08, 8-channel)
+
+* [ ] Verify RLS08 sensor power voltage
+* [ ] Verify AOUT maximum voltage before connecting to ESP32 (5 V warning above)
+* [ ] Determine whether voltage divider/protection is required
+* [ ] Verify sensor channel polarity (which level = line)
+* [ ] Verify sensor ordering
+* [ ] Verify Sensor 1 is the rightmost channel (CONFIRMED in software: index 0 = Sensor 1 = rightmost, weight +1)
+* [ ] Verify remaining sensor pin assignments (Sensors 7 & 8 are `PIN_UNASSIGNED` — TODO)
+* [ ] Verify ADC channel compatibility (if the variant is analog)
+* [ ] Verify analog/digital operating mode (driver currently assumes digital, HIGH = line)
+* [ ] Verify line/background response
+* [ ] Verify calibration behavior
+
+Confirmed sensor GPIO assignments (from `src/config/PinConfig.h`):
+
+```text
+Sensor 1 (rightmost) = GPIO 32   (CONFIRMED)
+Sensor 2             = GPIO 33   (CONFIRMED)
+Sensor 3             = GPIO 25   (CONFIRMED)
+Sensor 4             = GPIO 26   (CONFIRMED)
+Sensor 5             = GPIO 27   (CONFIRMED)
+Sensor 6             = GPIO 14   (CONFIRMED)
+Sensor 7             = TODO: VERIFY (PIN_UNASSIGNED)
+Sensor 8             = TODO: VERIFY (PIN_UNASSIGNED)
+```
+
+Use `test_sensor/test_sensor.ino` for all sensor verification — it is
+independent of the line-following system.
+
+**Architecture reference:** the sensor feeds the FAST layer
+([Architecture](#architecture),
+[Control-flow diagram](#control-flow-diagram)) as the "Line/Path State
+Estimator" input. The driver is `src/sensors/RLS08LineSensor.cpp`; the
+hardware-independent interface it implements is `src/sensors/LineSensor.h`.
+If your variant differs (polarity, order, analog), you change **one file**
+or flip a config flag — the controller never knows. The sign convention
+the controller expects (e > 0 = line RIGHT) is defined in
+[Coordinate frames](#coordinate-frames-sign-conventions-and-units).
+
+## OLED
+
+* [ ] Confirm OLED controller (the code defaults to **SH1106**; switch to SSD1306 in ONE place: `src/ui/Display.cpp`, search `OLED_TODO`)
+* [ ] Confirm SSD1306 vs SH1106 if necessary
+* [ ] Confirm OLED supply voltage
+* [ ] Confirm SDA pin (currently `PIN_UNASSIGNED` — TODO)
+* [ ] Confirm SCL pin (currently `PIN_UNASSIGNED` — TODO)
+* [ ] Confirm OLED I2C address (default 0x3C; some modules use 0x3D)
+
+Note: the common ESP32 I2C pins GPIO 21/22 are **already used** by the
+L298N (IN3/IN4), so the OLED needs other pins. The OLED is optional at
+runtime: if it is absent or its pins are unassigned, the robot runs
+headless with full serial diagnostics.
+
+**Architecture reference:** the OLED is part of the **UI loop** in
+`main.ino` (see [Local UI](#local-ui-oled--4-buttons)). It sits *outside*
+the FAST control layer — the 200 Hz loop never waits for the display;
+the UI is rate-limited to ~5 Hz and never blocks control.
+
+## Buttons (UP / DOWN / SELECT / BACK)
+
+* [ ] Assign UP GPIO (currently `PIN_UNASSIGNED` — TODO)
+* [ ] Assign DOWN GPIO (currently `PIN_UNASSIGNED` — TODO)
+* [ ] Assign SELECT GPIO (currently `PIN_UNASSIGNED` — TODO)
+* [ ] Assign BACK GPIO (currently `PIN_UNASSIGNED` — TODO)
+* [ ] Verify pull-up/pull-down configuration (code assumes internal pull-up, pressed = LOW)
+* [ ] Verify button electrical behavior
+
+With unassigned button pins the UI is inert (no accidental resets); the
+robot still runs and the serial interface still works.
+
+**Architecture reference:** buttons drive the same UI loop as the OLED
+([Local UI](#local-ui-oled--4-buttons), `src/ui/Buttons.cpp`,
+`src/ui/Menu.cpp`). The ON/OFF gate they control lives in
+`PathController::setEnabled()` — see the boot safety rule at the top and
+[Architecture](#architecture).
+
+## Motors / L298N
+
+* [ ] Verify motor polarity
+* [ ] Verify left/right motor mapping (code assumes OUT1/OUT2 = LEFT, OUT3/OUT4 = RIGHT)
+* [ ] Verify L298N ENA/ENB behavior
+* [ ] Verify PWM behavior
+* [ ] Verify motor supply voltage
+* [ ] Verify common ground (ESP32, L298N logic, motor supply)
+* [ ] Verify motor direction against software
+
+Confirmed motor-driver GPIO configuration:
+
+```text
+ENA = GPIO 4    (CONFIRMED)
+IN1 = GPIO 18   (CONFIRMED)
+IN2 = GPIO 19   (CONFIRMED)
+IN3 = GPIO 21   (CONFIRMED)
+IN4 = GPIO 22   (CONFIRMED)
+ENB = GPIO 23   (CONFIRMED)
+```
+
+Use `test_motors/test_motors.ino` for all motor verification —
+conservative duty cycles, independent of the sensor system.
+
+**Architecture reference:** motors are the last stage of the FAST layer
+([Architecture](#architecture)): `DifferentialDrive` mixes `(v, ω)` into
+wheel speeds (`v_L = v − (b/2)·ω`, see
+[The mathematics §4](#the-mathematics)), and the `Motor` class is the
+only place PWM duty exists. If a motor runs backwards, flip `invert` in
+its config in `main.ino` — never the math (sign conventions:
+[Coordinate frames](#coordinate-frames-sign-conventions-and-units)).
+
+## IMU (MPU6050) — FUTURE, deliberately not implemented
+
+* [ ] Future: MPU6050 integration
+* [ ] Future: MPU6050 testing
+* [ ] Future: IMU calibration
+
+The IMU is **completely inactive** in this milestone: no sensing, no
+fusion, no calibration, no test code. Nothing fails or blocks because
+the MPU6050 is absent. Do not implement it now.
+
+**Architecture reference:** the IMU would only ever feed the OPTIONAL
+SLOW calibration layer ([Architecture](#architecture),
+[Control-flow diagram](#control-flow-diagram) — "IMU (gyro z)"), which is
+compiled out with `CALIBRATION_ENABLED = false`. It is never part of the
+FAST control path. The abstract interface it would implement is
+`src/sensors/IMUInterface.h`.
+
+## Other unknowns (software parameters to measure)
+
+| Item | Status | Where |
+|------|--------|-------|
+| Motor gearbox ratio | Unknown — irrelevant for open-loop PWM; needed for future odometry | TODO in `DifferentialDrive.cpp` |
+| Wheel track | Placeholder 0.15 m — **measure** | `RobotConfig.h` |
+| Actual motor voltage range | ~6–7 V stated; L298N drops 1.5–2.5 V — full-duty wheel speed **measure** | `DifferentialDrive` `maxWheelSpeed_` |
+| Motor deadband | Not implemented (L298N has no feedback) — add per-motor once measured | TODO in `Motor.h` |
+
+Search the code for `TODO(hardware)` to find every place that needs
+verification before running on the physical robot.
+
+---
+
+# Step-by-step bring-up and usage
+
+Follow these steps **in order**. Each hardware step maps to a checklist
+item in the [Hardware & Validation TODO](#hardware--validation-todo--start-here)
+above. Do not skip the electrical checks in Step 1.
+
+**Prerequisites**
+
+- Arduino IDE or arduino-cli with the **ESP32 Arduino core 3.x**
+  installed.
+- The **U8g2** library (Library Manager → "U8g2" by Oliver Kraus).
+- Serial monitor at **115200 baud**.
+- All three sketches compile from this repository as-is:
+  `main.ino` (root), `test_sensor/test_sensor.ino`,
+  `test_motors/test_motors.ino`.
+
+## Step 1 — Electrical checks (power OFF, nothing connected to ESP32 yet)
+
+1. Power the RLS08 and **measure its AOUT voltage** on a channel seeing
+   the line and one seeing background (5 V warning above).
+2. If AOUT can exceed ~3.3 V, add a voltage divider to **every channel**
+   before connecting anything.
+3. Confirm ESP32, L298N logic, and motor supply share a **common ground**.
+
+## Step 2 — Sensor verification (`test_sensor.ino`)
+
+1. Open `test_sensor/test_sensor.ino` and upload it. It is fully
+   independent of the line-following system — nothing else runs.
+2. Open the serial monitor (115200). The sketch prints the pin map, raw
+   levels, interpreted bits (S8..S1, left-to-right), active count, and
+   the weighted position/error.
+3. **Polarity:** place the line under one sensor. If the "interpreted"
+   bit is 0 while raw is HIGH, polarity is inverted — note it.
+4. **Order:** sweep the line from the robot's right to left and check
+   the bit that lights up moves S1 → S8 (Sensor 1 = rightmost).
+5. **Junction:** place the robot on a cross/junction and confirm the
+   junction detection line behaves as expected.
+6. Record results, then update `src/config/PinConfig.h` (Sensors 7 & 8
+   pins) and the `lineIsHigh` / `reverseOrder` flags in `main.ino`
+   (`rls08Config()`) accordingly.
+
+## Step 3 — Motor verification (`test_motors.ino`) — wheels OFF the ground
+
+1. **Put the robot on a stand so the wheels cannot touch the ground.**
+2. Open `test_motors/test_motors.ino` and upload it. It runs an 8-step
+   sequence (left fwd/rev, right fwd/rev, both, stop, PWM sweep) at a
+   conservative 25% duty.
+3. Watch each step against the printed labels and verify:
+   - the motor labelled LEFT is the physical left motor (OUT1/OUT2),
+   - "forward" spins both wheels toward the robot's front,
+   - the PWM sweep changes speed smoothly.
+4. If a motor runs backwards, set `invert = true` in its config in
+   `main.ino` (`leftMotorConfig()` / `rightMotorConfig()`). If left and
+   right are swapped, swap the pin groups in `src/config/PinConfig.h`.
+
+## Step 4 — Assign UI pins and flash the main firmware
+
+1. Choose free GPIOs for the OLED (SDA/SCL — **not** 21/22, they are the
+   L298N IN3/IN4) and the four buttons, and fill them in
+   `src/config/PinConfig.h` (`defaultOLEDPins()`, `defaultButtonPins()`).
+2. If your OLED is an SSD1306 rather than SH1106, switch the constructor
+   in `src/ui/Display.cpp` (search `OLED_TODO` — one line).
+3. Upload `main.ino`. Expected boot behaviour:
+   - motors stay stopped (system boots OFF),
+   - the OLED shows the main menu (AUTO MODE / MANUAL MODE / PID / PARAMS /
+     SYSTEM / RESET),
+   - the serial heartbeat runs at 115200 baud.
+4. If the OLED stays blank, check the I2C address (0x3C vs 0x3D) and
+   wiring; the robot keeps running headless either way.
+
+## Step 5 — First line-following run
+
+1. Place the robot **on the line** before turning anything on.
+2. In MANUAL MODE, confirm the live sensor view: bits S8..S1, position
+   and error change as you slide the robot over the line. The error
+   sign must follow the convention (e > 0 = line to the RIGHT).
+3. Set a **low forward speed** first: PID / PARAMS → fwd speed.
+4. Turn the system ON: SYSTEM → ON. The robot starts following.
+5. To stop at any time: SYSTEM → OFF (motors safely stopped), or hold
+   **SELECT + BACK ~3 s** for a hard reboot. Both work from any screen.
+6. If the robot steers the wrong way (away from the line), the polarity
+   or channel order is wrong — go back to Step 2. Do not "fix" this by
+   negating gains.
+
+## Step 6 — Tuning and saving
+
+1. Tune in PID / PARAMS: start with kp only (ki = kd = 0), increase
+   until the robot follows, then add kd to damp oscillation, then a
+   small ki if there is a steady offset. Adjust target position to
+   centre the robot over the line.
+2. **SELECT persists** the edited value to NVS (survives reboot);
+   **BACK cancels** and restores the pre-edit value. Nothing is saved
+   without an explicit SELECT.
+3. RESET (menu item) clears all saved configuration and reboots with
+   compiled-in defaults.
+
+## Daily usage
+
+Power on → system is OFF (motors stopped) → check MANUAL MODE if you
+want a live sensor view → SYSTEM → ON to follow the line → SYSTEM → OFF
+when done. Parameters persist across power cycles once saved with
+SELECT. The serial commands
+([below](#serial-diagnostics-commands)) mirror everything the UI does
+and work even with no OLED/buttons attached.
 
 ---
 
@@ -304,6 +571,14 @@ src/
 │   ├── CalibrationMetrics.h/.cpp # independent windowed metrics
 │   └── PIDCalibrator.h/.cpp   # bounded coordinate-descent supervisor
 │
+├── system/
+│   └── PersistentConfig.h/.cpp # NVS persistence (writes ONLY on user confirm)
+│
+├── ui/
+│   ├── Display.h/.cpp         # U8g2 OLED wrapper (SH1106 default, SSD1306 TODO)
+│   ├── Buttons.h/.cpp         # 4 debounced buttons + SELECT+BACK hard reset
+│   └── Menu.h/.cpp            # menu state machine (AUTO/MANUAL/PARAMS/SYSTEM/RESET)
+│
 ├── diagnostics/
 │   └── Diagnostics.h/.cpp     # rate-limited serial commands + heartbeat
 │
@@ -313,6 +588,9 @@ src/
 test/
 ├── host_test.cpp              # g++ entry point for the suite
 └── arduino_stubs/Arduino.h    # minimal Arduino API for host compilation
+
+test_sensor/test_sensor.ino    # standalone sensor-verification sketch
+test_motors/test_motors.ino    # standalone motor-verification sketch
 ```
 
 ## Building
@@ -321,14 +599,15 @@ test/
 root (the IDE compiles `main.ino` plus everything under `src/`
 recursively). Requires the ESP32 Arduino core (3.x recommended; the
 `Motor.cpp` LEDC calls use the 3.x API — see the TODO there for 2.x
-compatibility).
+compatibility) and the **U8g2** library.
 
 ```bash
 arduino-cli compile --fqbn esp32:esp32:esp32 .
 ```
 
 Verified: compiles with both `CALIBRATION_ENABLED false` and `true`
-(~22% flash, ~7% RAM).
+(~25% flash, ~7% RAM). The two test sketches compile standalone with
+the same FQBN.
 
 **Host (no hardware):**
 
@@ -354,6 +633,12 @@ g++ -std=c++17 -Isrc -Itest/arduino_stubs \
 
 Run them on the host (command above) or on-target by setting
 `RUN_SELF_TEST_AT_BOOT true` in `main.ino`.
+
+**Hardware testing** (the physical part of the test plan) is the
+[step-by-step bring-up](#step-by-step-bring-up-and-usage) procedure:
+`test_sensor.ino` (Step 2) and `test_motors.ino` (Step 3) are
+deliberately separate sketches so each subsystem can be verified in
+isolation before the full firmware runs.
 
 ## Serial diagnostics commands
 
@@ -386,137 +671,13 @@ help        command list
 - **Control point:** `l` metres forward of the axle midpoint
   (config: `controlPointDistance`).
 
-## Unknown hardware information (TODOs)
-
-The task (§24) requires unknowns to be **explicit**, not invented:
-
-| Item | Status | Where |
-|------|--------|-------|
-| RLS08 exact interface | Assumed 8× digital, HIGH=line; **verify polarity/order/variant** | `RLS08LineSensor::Config`, `PinConfig.h` |
-| ESP32 pin assignments | Placeholders mirroring common wiring; **verify** | `PinConfig.h` |
-| Exact IMU model | Unknown — abstract `IMUInterface` only; yaw explicitly NOT assumed | `IMUInterface.h`, `main.ino` |
-| Motor gearbox ratio | Unknown — irrelevant for open-loop PWM; needed for future odometry | TODO in `DifferentialDrive.cpp` |
-| Wheel track | Placeholder 0.15 m — **measure** | `RobotConfig.h` |
-| Actual motor voltage range | ~6–7 V stated; L298N drops 1.5–2.5 V — full-duty wheel speed **measure** | `DifferentialDrive` `maxWheelSpeed_` |
-| L298N enable/input pin arrangement | Standard ENA/IN1/IN2 + ENB/IN3/IN4 assumed — **verify** | `PinConfig.h` |
-| Motor deadband | Not implemented (L298N has no feedback) — add per-motor once measured | TODO in `Motor.h` |
-
-Search the code for `TODO(hardware)` to find every place that needs
-verification before running on the physical robot.
-
----
-
-# Hardware & Validation TODO
-
-Everything below **still requires physical verification**. Nothing here
-has been tested on hardware by the coding environment — compile success
-is not hardware validation. Confirmed facts are marked CONFIRMED;
-everything else is an open item.
-
-## ⚠️ Electrical constraint — read before connecting the sensor
-
-The **ESP32 GPIO/ADC inputs are NOT 5 V tolerant**. The RLS08 is
-expected to be powered at **5 V**, and its actual AOUT voltage **must be
-measured before connecting any channel to the ESP32**. Do **not** assume
-that a 5 V-powered sensor only swings to 3.3 V. If AOUT can exceed ~3.3 V,
-a voltage divider (or other protection) is **required** on every channel.
-
-## Sensor (RLS08, 8-channel)
-
-* [ ] Verify RLS08 sensor power voltage
-* [ ] Verify AOUT maximum voltage before connecting to ESP32 (5 V warning above)
-* [ ] Determine whether voltage divider/protection is required
-* [ ] Verify sensor channel polarity (which level = line)
-* [ ] Verify sensor ordering
-* [ ] Verify Sensor 1 is the rightmost channel (CONFIRMED in software: index 0 = Sensor 1 = rightmost, weight +1)
-* [ ] Verify remaining sensor pin assignments (Sensors 7 & 8 are `PIN_UNASSIGNED` — TODO)
-* [ ] Verify ADC channel compatibility (if the variant is analog)
-* [ ] Verify analog/digital operating mode (driver currently assumes digital, HIGH = line)
-* [ ] Verify line/background response
-* [ ] Verify calibration behavior
-
-Confirmed sensor GPIO assignments (from `src/config/PinConfig.h`):
-
-```text
-Sensor 1 (rightmost) = GPIO 32   (CONFIRMED)
-Sensor 2             = GPIO 33   (CONFIRMED)
-Sensor 3             = GPIO 25   (CONFIRMED)
-Sensor 4             = GPIO 26   (CONFIRMED)
-Sensor 5             = GPIO 27   (CONFIRMED)
-Sensor 6             = GPIO 14   (CONFIRMED)
-Sensor 7             = TODO: VERIFY (PIN_UNASSIGNED)
-Sensor 8             = TODO: VERIFY (PIN_UNASSIGNED)
-```
-
-Use `test_sensor/test_sensor.ino` for all sensor verification — it is
-independent of the line-following system.
-
-## OLED
-
-* [ ] Confirm OLED controller (the code defaults to **SH1106**; switch to SSD1306 in ONE place: `src/ui/Display.cpp`, search `OLED_TODO`)
-* [ ] Confirm SSD1306 vs SH1106 if necessary
-* [ ] Confirm OLED supply voltage
-* [ ] Confirm SDA pin (currently `PIN_UNASSIGNED` — TODO)
-* [ ] Confirm SCL pin (currently `PIN_UNASSIGNED` — TODO)
-* [ ] Confirm OLED I2C address (default 0x3C; some modules use 0x3D)
-
-Note: the common ESP32 I2C pins GPIO 21/22 are **already used** by the
-L298N (IN3/IN4), so the OLED needs other pins. The OLED is optional at
-runtime: if it is absent or its pins are unassigned, the robot runs
-headless with full serial diagnostics.
-
-## Buttons (UP / DOWN / SELECT / BACK)
-
-* [ ] Assign UP GPIO (currently `PIN_UNASSIGNED` — TODO)
-* [ ] Assign DOWN GPIO (currently `PIN_UNASSIGNED` — TODO)
-* [ ] Assign SELECT GPIO (currently `PIN_UNASSIGNED` — TODO)
-* [ ] Assign BACK GPIO (currently `PIN_UNASSIGNED` — TODO)
-* [ ] Verify pull-up/pull-down configuration (code assumes internal pull-up, pressed = LOW)
-* [ ] Verify button electrical behavior
-
-With unassigned button pins the UI is inert (no accidental resets); the
-robot still runs and the serial interface still works.
-
-## Motors / L298N
-
-* [ ] Verify motor polarity
-* [ ] Verify left/right motor mapping (code assumes OUT1/OUT2 = LEFT, OUT3/OUT4 = RIGHT)
-* [ ] Verify L298N ENA/ENB behavior
-* [ ] Verify PWM behavior
-* [ ] Verify motor supply voltage
-* [ ] Verify common ground (ESP32, L298N logic, motor supply)
-* [ ] Verify motor direction against software
-
-Confirmed motor-driver GPIO configuration:
-
-```text
-ENA = GPIO 4    (CONFIRMED)
-IN1 = GPIO 18   (CONFIRMED)
-IN2 = GPIO 19   (CONFIRMED)
-IN3 = GPIO 21   (CONFIRMED)
-IN4 = GPIO 22   (CONFIRMED)
-ENB = GPIO 23   (CONFIRMED)
-```
-
-Use `test_motors/test_motors.ino` for all motor verification —
-conservative duty cycles, independent of the sensor system.
-
-## IMU (MPU6050) — FUTURE, deliberately not implemented
-
-* [ ] Future: MPU6050 integration
-* [ ] Future: MPU6050 testing
-* [ ] Future: IMU calibration
-
-The IMU is **completely inactive** in this milestone: no sensing, no
-fusion, no calibration, no test code. Nothing fails or blocks because
-the MPU6050 is absent. Do not implement it now.
-
 ---
 
 # Local UI (OLED + 4 buttons)
 
 The OLED and four buttons provide the robot's local configuration
-interface. All pin assignments are TODO until verified (see above).
+interface. All pin assignments are TODO until verified (see
+[Hardware & Validation TODO](#hardware--validation-todo--start-here)).
 
 ```text
 MAIN MENU
