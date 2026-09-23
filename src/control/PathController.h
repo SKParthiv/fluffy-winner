@@ -74,6 +74,17 @@ public:
     const PIDGains& getGains() const;
     void setIntegralEnabled(bool enabled);
 
+    /**
+     * System ON/OFF gate (UI "SYSTEM: ON/OFF").
+     * OFF: the sensor keeps updating (so the UI can show live values) but
+     * the motors are commanded to a safe stop EVERY cycle and the PID is
+     * skipped — the loop can never accidentally restart the motors.
+     * Re-enabling resets the PID state so no stale integral/derivative
+     * kicks the robot when switching back on.
+     */
+    void setEnabled(bool enabled);
+    bool isEnabled() const { return enabled_; }
+
     /// Loop-timing statistics (task §7): measured over real executions.
     uint32_t getLastLoopPeriodUs() const { return lastLoopPeriodUs_; }
     uint32_t getMinLoopPeriodUs()  const { return minLoopPeriodUs_; }
@@ -116,6 +127,7 @@ private:
     bool  lineLost_;
     float lastErrorSign_;   ///< sign of last valid error, for search turn
     float lastV_, lastOmega_;
+    bool  enabled_;         ///< system ON/OFF gate (false = motors stopped)
 };
 
 #endif // PATH_CONTROLLER_H

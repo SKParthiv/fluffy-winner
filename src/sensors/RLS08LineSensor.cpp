@@ -2,9 +2,13 @@
  * RLS08LineSensor.cpp
  * ====================
  * Implementation notes:
- *  - update() does 8 digitalRead()s: cheap and non-blocking, safe at 200 Hz.
+ *  - update() polls only ASSIGNED pins (Sensors 1-6 confirmed so far).
+ *    PIN_UNASSIGNED channels are reported as "no line" and are never
+ *    touched — no invented hardware.
+ *  - Index 0 == Sensor 1 == RIGHTMOST channel (CONFIRMED orientation),
+ *    so the position sign convention stays: positive = line to the right.
  *  - No protocol, register map or analog thresholding is invented here.
- *    If your RLS08 variant exposes analog outputs, replace this file only;
+ *    If your RLS08 variant exposes analog outputs, extend this file only;
  *    the LineSensor interface stays identical (that is the point of the
  *    abstraction).
  */
@@ -13,27 +17,43 @@
 #include <Arduino.h>
 
 RLS08LineSensor::RLS08LineSensor(const Config& cfg)
-    : cfg_(cfg), activeCount_(0), lastDirectionSign_(0.0f) {
-    for (int i = 0; i < NUM_CHANNELS; ++i) raw_[i] = false;
+    : cfg_(cfg), activeCount_(0), assignedCount_(0),
+      lastDirectionSign_(0.0f) {
+    for (int i = 0; i < NUM_CHANNELS; ++i) {
+        raw_[i] = false;
+        levels_[i] = false;
+    }
 }
 
 bool RLS08LineSensor::begin() {
+    assignedCount_ = 0;
     for (int i = 0; i < NUM_CHANNELS; ++i) {
-        pinMode(cfg_.pins.channelPins[i], INPUT);
+        // Failsafe: never pinMode/digitalRead an unassigned (TODO) pin.
+        if (pinAssigned(cfg_.pins.sensorPins[i])) {
+            pinMode(cfg_.pins.sensorPins[i], INPUT);
+            ++assignedCount_;
+        }
     }
-    return true;
+    return true;  // digital inputs have no meaningful init failure mode;
+                  // electrical validity is verified with test_sensor.ino.
 }
 
 bool RLS08LineSensor::update() {
-    // Channel 0 is defined as the LEFTMOST channel of the array.
-    for (int i = 0; i < NUM_CHANNELS; ++i) {
-        int pinIndex = cfg_.reverseOrder ? (NUM_CHANNELS - 1 - i) : i;
-        bool level = (digitalRead(cfg_.pins.channelPins[pinIndex]) == HIGH);
-        raw_[i] = (level == cfg_.lineIsHigh);
-    }
-
     activeCount_ = 0;
+
+    // Index 0 == Sensor 1 == RIGHTMOST. reverseOrder mirrors the array for
+    // the (unconfirmed) case that the physical wiring turns out mirrored.
     for (int i = 0; i < NUM_CHANNELS; ++i) {
+        const int sensorIndex = cfg_.reverseOrder ? (NUM_CHANNELS - 1 - i) : i;
+        const uint8_t pin = cfg_.pins.sensorPins[sensorIndex];
+        if (!pinAssigned(pin)) {
+            levels_[i] = false;
+            raw_[i] = false;
+            continue;
+        }
+        const bool level = (digitalRead(pin) == HIGH);
+        levels_[i] = level;
+        raw_[i] = (level == cfg_.lineIsHigh);
         if (raw_[i]) ++activeCount_;
     }
 
@@ -41,7 +61,7 @@ bool RLS08LineSensor::update() {
     const bool lineDetected = (activeCount_ > 0);
 
     if (lineDetected) {
-        measurement_.position = computePosition(true);
+        measurement_.position = computePosition();
         measurement_.valid = true;
 
         // Confidence model:
@@ -85,14 +105,19 @@ void RLS08LineSensor::readRaw(bool out[NUM_CHANNELS]) const {
     for (int i = 0; i < NUM_CHANNELS; ++i) out[i] = raw_[i];
 }
 
-float RLS08LineSensor::channelWeight(int index) const {
-    // w_i in [-1, +1]: channel 0 (left) -> -1, channel 7 (right) -> +1.
-    const float half = (NUM_CHANNELS - 1) / 2.0f;
-    return (static_cast<float>(index) - half) / half;
+void RLS08LineSensor::readLevels(bool out[NUM_CHANNELS]) const {
+    for (int i = 0; i < NUM_CHANNELS; ++i) out[i] = levels_[i];
 }
 
-float RLS08LineSensor::computePosition(bool anyActive) const {
-    (void)anyActive;  // caller guarantees activeCount_ > 0
+float RLS08LineSensor::channelWeight(int index) const {
+    // w_i in [-1, +1]: Sensor 1 (index 0, RIGHTMOST) -> +1,
+    // Sensor 8 (index 7, leftmost) -> -1. Positive = right, matching the
+    // error convention in RobotConfig.h.
+    const float half = (NUM_CHANNELS - 1) / 2.0f;
+    return (half - static_cast<float>(index)) / half;
+}
+
+float RLS08LineSensor::computePosition() const {
     float sum = 0.0f;
     for (int i = 0; i < NUM_CHANNELS; ++i) {
         if (raw_[i]) sum += channelWeight(i);

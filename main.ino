@@ -3,19 +3,29 @@
  * ================================================
  * Integration ONLY. No control math, no driver details: those live in
  * the modules under src/. This file wires the modules together and runs
- * two INDEPENDENT, never-blocking loops:
+ * independent, never-blocking loops:
  *
  *   FAST loop  (200 Hz, micros()-scheduled): PathController
+ *   UI loop    (every pass, internally rate-limited): OLED menu + buttons
  *   SLOW loop  (~1 Hz,  micros()-scheduled): PIDCalibrator (optional)
  *   Diagnostics: serial commands + 1 Hz heartbeat
  *
- * Architecture (task §26) — the dependency direction is:
+ * Architecture — the dependency direction is:
  *
  *   LineSensor -> PathController -> DifferentialDrive -> Motors
  *   (calibration, when enabled, only OBSERVES and calls setGains())
+ *   OLED <-> 4-button UI -> configuration / calibration / system state
  *
- * With CALIBRATION_ENABLED = false (see RobotConfig.h) the calibrator is
+ * With CALIBRATION_ENABLED = false (RobotConfig.h) the calibrator is
  * never constructed and the robot runs purely on the baseline gains.
+ *
+ * The IMU (MPU6050) is deliberately COMPLETELY ABSENT from this build:
+ * no sensing, no fusion, no calibration, no test code. It is future
+ * functionality; nothing here fails or blocks because it is missing.
+ *
+ * Boot behaviour: the system starts in the OFF state (motors stopped).
+ * Turn it ON via the OLED menu (SYSTEM) — the robot must never start
+ * driving the moment it is powered.
  */
 
 #include <Arduino.h>
@@ -30,6 +40,12 @@
 #include "src/motion/DifferentialDrive.h"
 
 #include "src/control/PathController.h"
+
+#include "src/system/PersistentConfig.h"
+
+#include "src/ui/Display.h"
+#include "src/ui/Buttons.h"
+#include "src/ui/Menu.h"
 
 #if CALIBRATION_ENABLED
 #include "src/sensors/IMUInterface.h"
@@ -59,7 +75,7 @@ static RobotConfig robotConfig;
 static RLS08LineSensor::Config rls08Config() {
     RLS08LineSensor::Config c;
     c.pins = defaultRLS08Pins();
-    // TODO(hardware): verify polarity and channel order for your board!
+    // TODO(hardware): verify polarity and channel order with test_sensor.ino!
     c.lineIsHigh = true;
     c.reverseOrder = false;
     return c;
@@ -116,10 +132,10 @@ static LineSensor& activeLineSensor() {
 static PathController fastController(activeLineSensor(), drive, robotConfig);
 
 #if CALIBRATION_ENABLED
-// The IMU is UNKNOWN hardware (task §5, §24): the baseline runs with a
-// nullptr IMU; plug a concrete IMUInterface implementation in here when
-// the model is chosen. Calibration degrades gracefully without it.
-static IMUInterface* imu = nullptr;  // TODO(hardware): instantiate real IMU
+// The IMU is future functionality (MPU6050 NOT implemented in this
+// milestone): the baseline runs with a nullptr IMU; plug a concrete
+// IMUInterface implementation in here when IMU support is added.
+static IMUInterface* imu = nullptr;  // TODO(future): instantiate MPU6050
 
 /**
  * Adapter that exposes the PathController to the calibrator through the
@@ -127,9 +143,8 @@ static IMUInterface* imu = nullptr;  // TODO(hardware): instantiate real IMU
  *
  * WHY an adapter instead of making PathController inherit
  * CalibrationTarget: the fast control layer must not include or depend
- * on ANY calibration header (task §26 dependency direction). The
- * coupling happens here, in the integration file, where the two layers
- * are allowed to meet.
+ * on ANY calibration header. The coupling happens here, in the
+ * integration file, where the two layers are allowed to meet.
  */
 class PathControllerCalibrationAdapter : public CalibrationTarget {
 public:
@@ -146,6 +161,17 @@ static PathControllerCalibrationAdapter calibrationTarget(fastController);
 static PIDCalibrator calibrator(calibrationTarget, imu, robotConfig.calibration);
 #endif
 
+// ---- UI: OLED + four buttons ----------------------------------------------
+
+static Display display(defaultOLEDPins());
+static Buttons buttons(defaultButtonPins());
+#if CALIBRATION_ENABLED
+static Menu menu(display, buttons, fastController, rls08, robotConfig,
+                 &calibrator);
+#else
+static Menu menu(display, buttons, fastController, rls08, robotConfig);
+#endif
+
 static Diagnostics diagnostics(robotConfig);
 
 // ---------------------------------------------------------------------------
@@ -153,11 +179,20 @@ static Diagnostics diagnostics(robotConfig);
 // ---------------------------------------------------------------------------
 
 void setup() {
+    // Load user-confirmed values from NVS (if any). Missing keys keep the
+    // compiled-in defaults: the robot boots and runs WITHOUT any prior
+    // calibration or saved config — calibration is never a boot dependency.
+    PersistentConfig::load(robotConfig);
+    fastController.setGains(robotConfig.controller.gains);
+    fastController.setIntegralEnabled(robotConfig.controller.integralEnabled);
+
+    // Controller starts DISABLED (motors stopped) — see PathController.
+    // The user turns the system ON via the OLED SYSTEM menu.
     fastController.begin();
 
 #if CALIBRATION_ENABLED
     // Calibration starts DISABLED even when compiled in; enable it via
-    // the serial command "cal on" or by calling calibrator.enable() here.
+    // the OLED AUTO MODE screen or the serial command "cal on".
 #endif
 
     diagnostics.attach(&fastController, &rls08,
@@ -168,6 +203,11 @@ void setup() {
 #endif
     );
     diagnostics.begin();
+
+    // UI: OLED absence is non-fatal (headless mode via serial).
+    display.begin();
+    buttons.begin();
+    menu.begin();
 
 #if RUN_SELF_TEST_AT_BOOT
     selftest::runAll();
@@ -198,6 +238,9 @@ void loop() {
         calibrator.update(now);
     }
 #endif
+
+    // ---- UI (buttons + OLED; internally rate-limited to ~5 Hz) --------
+    menu.update();
 
     // ---- Diagnostics (serial commands + rate-limited heartbeat) -------
     diagnostics.update(now);

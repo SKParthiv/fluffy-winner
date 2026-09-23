@@ -2,8 +2,8 @@
 
 A modular Arduino/ESP32 codebase for a two-wheeled differential-drive
 line-following robot, with a **mathematically defined path-tracking
-controller** and a **completely optional autonomous PID-calibration
-supervisor**.
+controller**, a **completely optional autonomous PID-calibration
+supervisor**, and a **local OLED + 4-button configuration interface**.
 
 The most important architectural rule of this project:
 
@@ -11,6 +11,12 @@ The most important architectural rule of this project:
 > must operate normally.** The calibration module is a slow supervisory
 > optimizer that only observes the robot and proposes PID gains. It is
 > never part of the real-time control path.
+
+Boot safety rule:
+
+> **The system boots in the OFF state.** Motors are commanded to a safe
+> stop every cycle until the user explicitly turns the system ON via the
+> OLED menu (SYSTEM). The robot never starts driving at power-up.
 
 ---
 
@@ -397,3 +403,140 @@ The task (§24) requires unknowns to be **explicit**, not invented:
 
 Search the code for `TODO(hardware)` to find every place that needs
 verification before running on the physical robot.
+
+---
+
+# Hardware & Validation TODO
+
+Everything below **still requires physical verification**. Nothing here
+has been tested on hardware by the coding environment — compile success
+is not hardware validation. Confirmed facts are marked CONFIRMED;
+everything else is an open item.
+
+## ⚠️ Electrical constraint — read before connecting the sensor
+
+The **ESP32 GPIO/ADC inputs are NOT 5 V tolerant**. The RLS08 is
+expected to be powered at **5 V**, and its actual AOUT voltage **must be
+measured before connecting any channel to the ESP32**. Do **not** assume
+that a 5 V-powered sensor only swings to 3.3 V. If AOUT can exceed ~3.3 V,
+a voltage divider (or other protection) is **required** on every channel.
+
+## Sensor (RLS08, 8-channel)
+
+* [ ] Verify RLS08 sensor power voltage
+* [ ] Verify AOUT maximum voltage before connecting to ESP32 (5 V warning above)
+* [ ] Determine whether voltage divider/protection is required
+* [ ] Verify sensor channel polarity (which level = line)
+* [ ] Verify sensor ordering
+* [ ] Verify Sensor 1 is the rightmost channel (CONFIRMED in software: index 0 = Sensor 1 = rightmost, weight +1)
+* [ ] Verify remaining sensor pin assignments (Sensors 7 & 8 are `PIN_UNASSIGNED` — TODO)
+* [ ] Verify ADC channel compatibility (if the variant is analog)
+* [ ] Verify analog/digital operating mode (driver currently assumes digital, HIGH = line)
+* [ ] Verify line/background response
+* [ ] Verify calibration behavior
+
+Confirmed sensor GPIO assignments (from `src/config/PinConfig.h`):
+
+```text
+Sensor 1 (rightmost) = GPIO 32   (CONFIRMED)
+Sensor 2             = GPIO 33   (CONFIRMED)
+Sensor 3             = GPIO 25   (CONFIRMED)
+Sensor 4             = GPIO 26   (CONFIRMED)
+Sensor 5             = GPIO 27   (CONFIRMED)
+Sensor 6             = GPIO 14   (CONFIRMED)
+Sensor 7             = TODO: VERIFY (PIN_UNASSIGNED)
+Sensor 8             = TODO: VERIFY (PIN_UNASSIGNED)
+```
+
+Use `test_sensor/test_sensor.ino` for all sensor verification — it is
+independent of the line-following system.
+
+## OLED
+
+* [ ] Confirm OLED controller (the code defaults to **SH1106**; switch to SSD1306 in ONE place: `src/ui/Display.cpp`, search `OLED_TODO`)
+* [ ] Confirm SSD1306 vs SH1106 if necessary
+* [ ] Confirm OLED supply voltage
+* [ ] Confirm SDA pin (currently `PIN_UNASSIGNED` — TODO)
+* [ ] Confirm SCL pin (currently `PIN_UNASSIGNED` — TODO)
+* [ ] Confirm OLED I2C address (default 0x3C; some modules use 0x3D)
+
+Note: the common ESP32 I2C pins GPIO 21/22 are **already used** by the
+L298N (IN3/IN4), so the OLED needs other pins. The OLED is optional at
+runtime: if it is absent or its pins are unassigned, the robot runs
+headless with full serial diagnostics.
+
+## Buttons (UP / DOWN / SELECT / BACK)
+
+* [ ] Assign UP GPIO (currently `PIN_UNASSIGNED` — TODO)
+* [ ] Assign DOWN GPIO (currently `PIN_UNASSIGNED` — TODO)
+* [ ] Assign SELECT GPIO (currently `PIN_UNASSIGNED` — TODO)
+* [ ] Assign BACK GPIO (currently `PIN_UNASSIGNED` — TODO)
+* [ ] Verify pull-up/pull-down configuration (code assumes internal pull-up, pressed = LOW)
+* [ ] Verify button electrical behavior
+
+With unassigned button pins the UI is inert (no accidental resets); the
+robot still runs and the serial interface still works.
+
+## Motors / L298N
+
+* [ ] Verify motor polarity
+* [ ] Verify left/right motor mapping (code assumes OUT1/OUT2 = LEFT, OUT3/OUT4 = RIGHT)
+* [ ] Verify L298N ENA/ENB behavior
+* [ ] Verify PWM behavior
+* [ ] Verify motor supply voltage
+* [ ] Verify common ground (ESP32, L298N logic, motor supply)
+* [ ] Verify motor direction against software
+
+Confirmed motor-driver GPIO configuration:
+
+```text
+ENA = GPIO 4    (CONFIRMED)
+IN1 = GPIO 18   (CONFIRMED)
+IN2 = GPIO 19   (CONFIRMED)
+IN3 = GPIO 21   (CONFIRMED)
+IN4 = GPIO 22   (CONFIRMED)
+ENB = GPIO 23   (CONFIRMED)
+```
+
+Use `test_motors/test_motors.ino` for all motor verification —
+conservative duty cycles, independent of the sensor system.
+
+## IMU (MPU6050) — FUTURE, deliberately not implemented
+
+* [ ] Future: MPU6050 integration
+* [ ] Future: MPU6050 testing
+* [ ] Future: IMU calibration
+
+The IMU is **completely inactive** in this milestone: no sensing, no
+fusion, no calibration, no test code. Nothing fails or blocks because
+the MPU6050 is absent. Do not implement it now.
+
+---
+
+# Local UI (OLED + 4 buttons)
+
+The OLED and four buttons provide the robot's local configuration
+interface. All pin assignments are TODO until verified (see above).
+
+```text
+MAIN MENU
+├── AUTO MODE    autonomous calibration: status, gains, start/stop
+├── MANUAL MODE live sensor view: raw channels (S8..S1), position, error,
+│                polarity flag toggle (runtime only)
+├── PID / PARAMS kp, ki, kd, integral on/off, target position, fwd speed
+├── SYSTEM       line-following ON/OFF (OFF = motors safely stopped)
+└── RESET        clear saved config (factory defaults) + reboot
+```
+
+* **UP/DOWN** navigate / change values (auto-repeat while held).
+* **SELECT** confirm / enter — this is the ONLY action that persists a
+  parameter edit to NVS.
+* **BACK** cancel / return — cancels an edit and restores the pre-edit value.
+* **Hold SELECT + BACK ~3 s** (from any screen): **hard reset** — the
+  ESP32 actually restarts (`ESP.restart()`). This is NOT the same as the
+  RESET menu item (which clears saved configuration).
+
+Persistence uses ESP32 NVS via the `Preferences` library (namespace
+`fluffy`). Values are written **only** on user-confirmed edits. Missing
+keys fall back to compiled-in defaults — the robot boots and runs
+without any saved config or completed calibration.

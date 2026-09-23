@@ -29,6 +29,8 @@ PIDCalibrator::PIDCalibrator(CalibrationTarget& target, IMUInterface* imu,
       imu_(imu),
       cfg_(cfg),
       state_(CalibrationState::CAL_DISABLED),
+      lastObjective_(0.0f),
+      candidateObjective_(0.0f),
       evaluatingCandidate_(false),
       coordinate_(0),
       direction_(1),
@@ -38,8 +40,6 @@ PIDCalibrator::PIDCalibrator(CalibrationTarget& target, IMUInterface* imu,
       lastRunUs_(0),
       enabledAtUs_(0),
       lastLineSeenUs_(0),
-      lastObjective_(0.0f),
-      candidateObjective_(0.0f),
       failReason_("") {
     baselineGains_      = target.getGains();
     lastKnownGoodGains_ = baselineGains_;

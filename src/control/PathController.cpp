@@ -32,7 +32,9 @@ PathController::PathController(LineSensor& sensor, DifferentialDrive& drive,
       lastError_(0.0f),
       lineLost_(false),
       lastErrorSign_(0.0f),
-      lastV_(0.0f), lastOmega_(0.0f) {}
+      lastV_(0.0f), lastOmega_(0.0f),
+      enabled_(false) {}  ///< boots OFF: motors must not run until the user
+                          ///< explicitly turns the system ON (safety).
 
 void PathController::begin() {
     sensor_.begin();
@@ -63,6 +65,20 @@ void PathController::update(uint32_t nowUs) {
     // ---- 2. Sensor ------------------------------------------------------
     sensor_.update();
     const LineMeasurement m = sensor_.getMeasurement();
+
+    // ---- 2b. System OFF gate ---------------------------------------------
+    // Sensors keep updating (live values for the OLED UI), but the motors
+    // are re-commanded to a safe stop EVERY cycle: even if some other code
+    // path wrote a speed, the loop cannot leave the motors running while
+    // the system is OFF.
+    if (!enabled_) {
+        drive_.stop();
+        lastError_ = m.position - targetPosition_;  // keep UI error fresh
+        lineLost_ = !m.valid;
+        lastV_ = 0.0f;
+        lastOmega_ = 0.0f;
+        return;
+    }
 
     // ---- 3. Error estimate ----------------------------------------------
     // e > 0 <=> line is RIGHT of the centreline (convention, RobotConfig.h)
@@ -110,6 +126,22 @@ void PathController::setGains(const PIDGains& gains) {
     // Only interaction point with the calibrator: a cheap, non-blocking
     // write. The fast loop never waits for calibration.
     pid_.setGains(gains);
+}
+
+void PathController::setEnabled(bool enabled) {
+    if (enabled == enabled_) return;
+    enabled_ = enabled;
+    if (!enabled) {
+        // Immediate, explicit safe state — do not wait for the next cycle.
+        drive_.stop();
+        lastV_ = 0.0f;
+        lastOmega_ = 0.0f;
+    } else {
+        // Fresh start: no stale integral/derivative state may kick the
+        // motors when the system comes back on.
+        pid_.reset();
+        lastErrorSign_ = 0.0f;
+    }
 }
 
 const PIDGains& PathController::getGains() const { return pid_.getGains(); }
