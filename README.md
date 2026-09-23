@@ -23,18 +23,19 @@ Boot safety rule:
 ## Table of contents
 
 1. [Hardware & Validation TODO — START HERE](#hardware--validation-todo--start-here)
-2. [Step-by-step bring-up and usage](#step-by-step-bring-up-and-usage)
-3. [Hardware](#hardware)
-4. [Architecture](#architecture)
-5. [Control-flow diagram](#control-flow-diagram)
-6. [The mathematics](#the-mathematics)
-7. [Enabling / disabling calibration](#enabling--disabling-calibration)
-8. [Repository layout](#repository-layout)
-9. [Building](#building)
-10. [Testing](#testing)
-11. [Serial diagnostics commands](#serial-diagnostics-commands)
-12. [Coordinate frames, sign conventions and units](#coordinate-frames-sign-conventions-and-units)
-13. [Local UI (OLED + 4 buttons)](#local-ui-oled--4-buttons)
+2. [Complete pin configuration (reference)](#complete-pin-configuration-reference)
+3. [Step-by-step bring-up and usage](#step-by-step-bring-up-and-usage)
+4. [Hardware](#hardware)
+5. [Architecture](#architecture)
+6. [Control-flow diagram](#control-flow-diagram)
+7. [The mathematics](#the-mathematics)
+8. [Enabling / disabling calibration](#enabling--disabling-calibration)
+9. [Repository layout](#repository-layout)
+10. [Building](#building)
+11. [Testing](#testing)
+12. [Serial diagnostics commands](#serial-diagnostics-commands)
+13. [Coordinate frames, sign conventions and units](#coordinate-frames-sign-conventions-and-units)
+14. [Local UI (OLED + 4 buttons)](#local-ui-oled--4-buttons)
 
 ---
 
@@ -193,6 +194,70 @@ FAST control path. The abstract interface it would implement is
 
 Search the code for `TODO(hardware)` to find every place that needs
 verification before running on the physical robot.
+
+## Complete pin configuration (reference)
+
+Single source of truth: `src/config/PinConfig.h`. `PIN_UNASSIGNED`
+(0xFF) means "not yet assigned — the code never touches that pin."
+Confirmed values are CONFIRMED; everything else is TODO: VERIFY.
+
+### L298N motor driver — CONFIRMED
+
+| L298N pin | GPIO | Function                        | Status    |
+|-----------|------|---------------------------------|-----------|
+| ENA       | 4    | Left motor PWM (OUT1/OUT2)      | CONFIRMED |
+| IN1       | 18   | Left motor direction            | CONFIRMED |
+| IN2       | 19   | Left motor direction            | CONFIRMED |
+| IN3       | 21   | Right motor direction           | CONFIRMED |
+| IN4       | 22   | Right motor direction           | CONFIRMED |
+| ENB       | 23   | Right motor PWM (OUT3/OUT4)     | CONFIRMED |
+
+Left/right motor mapping (which physical motor is on OUT1/OUT2 vs
+OUT3/OUT4) still needs verification with `test_motors.ino`.
+
+### RLS08 line sensor — Sensors 1–6 CONFIRMED, 7–8 TODO
+
+| Sensor | GPIO | Position                        | Status    |
+|--------|------|---------------------------------|-----------|
+| 1      | 32   | **Rightmost** channel           | CONFIRMED |
+| 2      | 33   |                                 | CONFIRMED |
+| 3      | 25   |                                 | CONFIRMED |
+| 4      | 26   |                                 | CONFIRMED |
+| 5      | 27   |                                 | CONFIRMED |
+| 6      | 14   |                                 | CONFIRMED |
+| 7      | —    |                                 | TODO: VERIFY (`PIN_UNASSIGNED`) |
+| 8      | —    | Leftmost channel                | TODO: VERIFY (`PIN_UNASSIGNED`) |
+
+### OLED (I2C) — all TODO
+
+| Signal | GPIO | Status    |
+|--------|------|-----------|
+| SDA    | —    | TODO: VERIFY (`PIN_UNASSIGNED`) |
+| SCL    | —    | TODO: VERIFY (`PIN_UNASSIGNED`) |
+| Address| 0x3C (7-bit) | TODO: VERIFY (some modules use 0x3D) |
+
+### Buttons (UP / DOWN / SELECT / BACK) — all TODO
+
+| Button | GPIO | Status    |
+|--------|------|-----------|
+| UP     | —    | TODO: VERIFY (`PIN_UNASSIGNED`) |
+| DOWN   | —    | TODO: VERIFY (`PIN_UNASSIGNED`) |
+| SELECT | —    | TODO: VERIFY (`PIN_UNASSIGNED`) |
+| BACK   | —    | TODO: VERIFY (`PIN_UNASSIGNED`) |
+
+Code assumes internal pull-ups (pressed = LOW) — verify against the
+actual wiring.
+
+### Pin-selection constraints (when assigning the TODOs)
+
+- **GPIO 21 and 22 are taken** (L298N IN3/IN4) — the OLED cannot use
+  the ESP32 default I2C pins; any other capable pair works (I2C is
+  remappable via `Wire.begin(sda, scl)`).
+- GPIO 34–39 are **input-only** — fine for buttons, NOT for PWM.
+- Avoid GPIO 6–11 (flash). Strapping pins (0, 2, 5, 12, 15) need care
+  at boot — none of the CONFIRMED pins are strapping pins.
+- No two CONFIRMED/assigned pins collide; keep it that way when adding
+  the TODOs (the config is the single place to check).
 
 ---
 
